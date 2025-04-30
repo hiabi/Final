@@ -177,7 +177,9 @@ def describe_cycles(cycles, request_map):
             matching_offer = next((o for o in giver['offers'] for w in receiver['wants']
                                    if o['full_name'].lower() == w['full_name'].lower()), None)
             if matching_offer:
-                line = f"Participant {giver_id} offers '{matching_offer['full_name']}' → to Participant {receiver_id}"
+                giver_name = request_map[giver_id].get('name', giver_id)
+                receiver_name = request_map[receiver_id].get('name', receiver_id)
+                line = f"{giver_name} offers '{matching_offer['full_name']}' → to {receiver_name}"
                 description.append(line)
 
         exchange_text = "\n".join(description)
@@ -217,7 +219,7 @@ matching_strategy = st.selectbox("Choose Matching Strategy:", ["Greedy Optimized
 
 if st.button("🧮 Find Exchange Cycles"):
     all_requests = load_all_requests_from_mongo()
-    request_map = {r['id']: r for r in all_requests}
+    request_map = {r['id']: {**r, 'name': r.get('name', r['id'])} for r in all_requests}
     G = build_graph(all_requests)
 
     if matching_strategy == "Greedy Optimized":
