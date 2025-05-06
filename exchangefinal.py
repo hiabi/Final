@@ -1,10 +1,11 @@
-# Final Version
+# Versión final corregida con retry automático
 import streamlit as st
 import pandas as pd
 import numpy as np
 import random
 import networkx as nx
 import datetime
+import time
 from io import BytesIO
 from pymongo import MongoClient
 import uuid
@@ -46,12 +47,11 @@ def save_user_data_to_mongo(offers, wants, name, agency_id):
 
 def load_all_requests_from_mongo():
     requests = []
-    participants = mongo_collection.find({})
+    participants = list(mongo_collection.find({}))
     for user in participants:
         for upload in user.get("uploads", []):
             offers = upload.get('offers', [])
             wants = upload.get('wants', [])
-
             for offer in offers:
                 if 'full_name' not in offer and 'MODELO' in offer and 'VERSION' in offer:
                     offer['full_name'] = offer['MODELO'].strip().upper() + " - " + offer['VERSION'].strip().upper()
@@ -61,6 +61,7 @@ def load_all_requests_from_mongo():
 
             requests.append({
                 'id': user['agency_id'],
+                'name': user.get('name', user['agency_id']),
                 'offers': offers,
                 'wants': wants,
                 'created_at': upload.get('uploaded_at', datetime.datetime.now()),
@@ -96,68 +97,21 @@ def violates_offer_conflict(cycle, request_map, used_offers):
                     used_offers.add(key)
     return False
 
-def sample_cycles_greedy_optimized(G, request_map, max_len=10):
+def sample_cycles_greedy(G, request_map, max_len=10):
     all_cycles = []
     used_nodes = set()
     used_offers = set()
 
-    all_simple_cycles = list(nx.simple_cycles(G))
-    all_simple_cycles = [c for c in all_simple_cycles if len(c) >= 3 and c[0] == c[-1]]
-    all_simple_cycles.sort(key=lambda x: -len(x))
-
-    for cycle in all_simple_cycles:
-        if any(n in used_nodes for n in cycle):
-            continue
-        if not violates_offer_conflict(cycle + [cycle[0]], request_map, used_offers):
-            all_cycles.append(cycle + [cycle[0]])
-            used_nodes.update(cycle)
-
-    return all_cycles
-
-def sample_cycles_hybrid(G, request_map, max_len=10):
-    all_cycles = []
-    used_nodes = set()
-    used_offers = set()
-
-    for sub_nodes in nx.connected_components(G.to_undirected()):
-        subgraph = G.subgraph(sub_nodes).copy()
-        n = len(subgraph.nodes)
-
-        if n <= 5:
-            simple = list(nx.simple_cycles(subgraph))
-            for cycle in simple:
-                if len(cycle) >= 3 and cycle[0] in subgraph.successors(cycle[-1]):
-                    cycle.append(cycle[0])
-                    if not any(p in used_nodes for p in cycle):
-                        if not violates_offer_conflict(cycle, request_map, used_offers):
-                            all_cycles.append(cycle)
-                            used_nodes.update(cycle)
-
-        elif n <= 20:
-            cycles = list(nx.simple_cycles(subgraph))
-            cycles.sort(key=len, reverse=True)
-            for cycle in cycles:
-                if len(cycle) <= max_len and not any(p in used_nodes for p in cycle):
-                    cycle.append(cycle[0])
-                    if not violates_offer_conflict(cycle, request_map, used_offers):
-                        all_cycles.append(cycle)
-                        used_nodes.update(cycle)
-
-        else:
-            for start in subgraph.nodes:
-                stack = [(start, [start])]
-                while stack:
-                    node, path = stack.pop()
-                    for neighbor in subgraph.successors(node):
-                        if neighbor == start and len(path) >= 3:
-                            cycle = path + [start]
-                            if not any(p in used_nodes for p in cycle):
-                                if not violates_offer_conflict(cycle, request_map, used_offers):
-                                    all_cycles.append(cycle)
-                                    used_nodes.update(cycle)
-                            break
-                        elif neighbor not in path and len(path) < max_len:
-                            stack.append((neighbor, path + [neighbor]))
+    for component in nx.connected_components(G.to_undirected()):
+        subgraph = G.subgraph(component).copy()
+        cycles = list(nx.simple_cycles(subgraph))
+        cycles = [c for c in cycles if len(c) >= 3 and c[0] == c[-1]]
+        cycles.sort(key=len, reverse=True)
+        for cycle in cycles:
+            if not any(node in used_nodes for node in cycle):
+                if not violates_offer_conflict(cycle, request_map, used_offers):
+                    all_cycles.append(cycle)
+                    used_nodes.update(cycle)
     return all_cycles
 
 def describe_cycles(cycles, request_map):
@@ -177,9 +131,7 @@ def describe_cycles(cycles, request_map):
             matching_offer = next((o for o in giver['offers'] for w in receiver['wants']
                                    if o['full_name'].lower() == w['full_name'].lower()), None)
             if matching_offer:
-                giver_name = request_map[giver_id].get('name', giver_id)
-                receiver_name = request_map[receiver_id].get('name', receiver_id)
-                line = f"{giver_name} offers '{matching_offer['full_name']}' → to {receiver_name}"
+                line = f"{giver['name']} offers '{matching_offer['full_name']}' → to {receiver['name']}"
                 description.append(line)
 
         exchange_text = "\n".join(description)
@@ -189,6 +141,7 @@ def describe_cycles(cycles, request_map):
             user_cycles.append({'cycle_id': cycle_id, 'exchange_path': exchange_text})
 
     return pd.DataFrame(all_cycles), pd.DataFrame(user_cycles)
+
 
 st.title("🚗 Car Exchange Platform")
 
@@ -215,18 +168,15 @@ if st.button("Upload File"):
 st.markdown("---")
 st.header("🔄 Run Matching Across All Current Uploads")
 
-matching_strategy = st.selectbox("Choose Matching Strategy:", ["Greedy Optimized", "Hybrid"])
-
 if st.button("🧮 Find Exchange Cycles"):
     all_requests = load_all_requests_from_mongo()
-    request_map = {r['id']: {**r, 'name': r.get('name', r['id'])} for r in all_requests}
+    if not all_requests:
+        time.sleep(10)
+        all_requests = load_all_requests_from_mongo()
+
+    request_map = {r['id']: r for r in all_requests}
     G = build_graph(all_requests)
-
-    if matching_strategy == "Greedy Optimized":
-        cycles = sample_cycles_greedy_optimized(G, request_map)
-    else:
-        cycles = sample_cycles_hybrid(G, request_map)
-
+    cycles = sample_cycles_greedy(G, request_map)
     df_all, _ = describe_cycles(cycles, request_map)
 
     st.subheader("🔍 Exchange Cycles Preview")
