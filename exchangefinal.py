@@ -1,4 +1,4 @@
-# Versión final corregida con retry automático
+# Versión final corregida con retry automático y selector de algoritmo
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -114,6 +114,29 @@ def sample_cycles_greedy(G, request_map, max_len=10):
                     used_nodes.update(cycle)
     return all_cycles
 
+def sample_cycles_exhaustive(G, request_map, max_len=10):
+    all_cycles = []
+    used_nodes = set()
+    used_offers = set()
+
+    for component in nx.connected_components(G.to_undirected()):
+        subgraph = G.subgraph(component).copy()
+        for start in subgraph.nodes:
+            stack = [(start, [start])]
+            while stack:
+                node, path = stack.pop()
+                for neighbor in subgraph.successors(node):
+                    if neighbor == start and len(path) >= 3:
+                        cycle = path + [start]
+                        if not any(p in used_nodes for p in cycle):
+                            if not violates_offer_conflict(cycle, request_map, used_offers):
+                                all_cycles.append(cycle)
+                                used_nodes.update(cycle)
+                        break
+                    elif neighbor not in path and len(path) < max_len:
+                        stack.append((neighbor, path + [neighbor]))
+    return all_cycles
+
 def describe_cycles(cycles, request_map):
     all_cycles = []
     user_cycles = []
@@ -142,7 +165,6 @@ def describe_cycles(cycles, request_map):
 
     return pd.DataFrame(all_cycles), pd.DataFrame(user_cycles)
 
-
 st.title("🚗 Car Exchange Platform")
 
 if mongo_collection is None:
@@ -168,6 +190,8 @@ if st.button("Upload File"):
 st.markdown("---")
 st.header("🔄 Run Matching Across All Current Uploads")
 
+algo_choice = st.radio("Choose Cycle Detection Algorithm:", ["Greedy (Efficient)", "Exhaustive (Comprehensive)"])
+
 if st.button("🧮 Find Exchange Cycles"):
     all_requests = load_all_requests_from_mongo()
     if not all_requests:
@@ -176,7 +200,12 @@ if st.button("🧮 Find Exchange Cycles"):
 
     request_map = {r['id']: r for r in all_requests}
     G = build_graph(all_requests)
-    cycles = sample_cycles_greedy(G, request_map)
+
+    if algo_choice == "Greedy (Efficient)":
+        cycles = sample_cycles_greedy(G, request_map)
+    else:
+        cycles = sample_cycles_exhaustive(G, request_map)
+
     df_all, _ = describe_cycles(cycles, request_map)
 
     st.subheader("🔍 Exchange Cycles Preview")
